@@ -39,6 +39,7 @@ import re
 import sys
 import time
 import binascii
+import email.utils
 
 # only needed for arc
 try:
@@ -940,6 +941,39 @@ class DKIM(DomainSigner):
         return self.verify_sig(sig, include_headers, sigheaders[idx], dnsfunc)
     return False # No signature
 
+  #: Verify all DKIM signatures with alignment test.
+  #: @type dnsfunc: callable
+  #: @param dnsfunc: an option function to lookup TXT resource records
+  #: for a DNS domain.  The default uses dnspython or pydns.
+  #: @return: True if any signature verifies or False otherwise
+  #: @raise DKIMException: when the message, signature, or key are badly formed
+  def full_verify(self,dnsfunc=get_txt):
+    from_addr = parse_from_addr(self.headers)
+    sig_cnt = len([(x, y) for x, y in self.headers if x.lower() == b"dkim-signature"])
+    for idx in range(sig_cnt):
+      prep = self.verify_headerprep(idx)
+      if prep:
+        sig, include_headers, sigheaders = prep
+        # DKIM identifier alignment test
+        if check_alignment(from_addr, sig[b'd']) \
+          and self.verify_sig(sig, include_headers, sigheaders[idx], dnsfunc):
+          return True
+    return False # No valid signature
+
+
+def parse_from_addr(headers):
+  from_val = [y for x, y in headers if x.lower() == b"from"]
+  if len(from_val) != 1:
+    raise MessageFormatError("Incorrect number of from header")
+  froms = email.utils.getaddresses(from_val)
+  if len(froms) != 1:
+    raise MessageFormatError("Incorrect number of from addresses")
+  return froms[0][1]
+
+
+def check_alignment(addr, domain):
+  return addr.endswith(b'.%s' % domain) or addr.endswith(b'@%s' % domain)
+
 
 #: Hold messages and options during ARC signing and verification.
 class ARC(DomainSigner):
@@ -1350,6 +1384,27 @@ def verify(message, logger=None, dnsfunc=get_txt, minkey=1024,
     d = DKIM(message,logger=logger,minkey=minkey,timeout=timeout,tlsrpt=tlsrpt)
     try:
         return d.verify(dnsfunc=dnsfunc)
+    except DKIMException as x:
+        if logger is not None:
+            logger.error("%s" % x)
+        return False
+
+
+def full_verify(message, logger=None, dnsfunc=get_txt, minkey=1024,
+        timeout=5, tlsrpt=False):
+    """Verify all DKIM signatures on an RFC822 formatted message.
+    @param message: an RFC822 formatted message (with either \\n or \\r\\n line endings)
+    @param logger: a logger to which debug info will be written (default None)
+    @param timeout: number of seconds for DNS lookup timeout (default = 5)
+    @param tlsrpt: message is an RFC 8460 TLS report (default False)
+     False: Not a tlsrpt, True: Is a tlsrpt, 'strict': tlsrpt, invalid if
+     service type is missing. For signing, if True, length is never used.
+    @return: True if signature verifies or False otherwise
+    """
+    # type: (bytes, any, function, int) -> bool
+    d = DKIM(message,logger=logger,minkey=minkey,timeout=timeout,tlsrpt=tlsrpt)
+    try:
+        return d.full_verify(dnsfunc=dnsfunc)
     except DKIMException as x:
         if logger is not None:
             logger.error("%s" % x)
